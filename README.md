@@ -1,4 +1,4 @@
-# PES 最小可运行实验框架
+# PES 最小可运行实验框架 / Minimal Runnable PES Experiment Framework
 
 本仓库提供一个二维势能面（PES）机器学习建模的最小可运行框架，包含：
 

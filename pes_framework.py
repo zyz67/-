@@ -59,6 +59,8 @@ def sample_lhs(n: int, low: float, high: float, rng: np.random.Generator) -> np.
 
 
 def sample_gradient_importance(n: int, low: float, high: float, candidates: int, rng: np.random.Generator) -> np.ndarray:
+    if n > candidates:
+        raise ValueError(f"train_size ({n}) must be <= candidate_size ({candidates}) for grad_importance sampling")
     pool = sample_uniform(candidates, low, high, rng)
     _, f = potential_and_force_np(pool)
     weight = np.linalg.norm(f, axis=1) + 1e-6
@@ -280,7 +282,7 @@ def plot_loss(train_loss: List[float], val_loss: List[float], out_path: str) -> 
 def parse_hidden_dims(text: str) -> List[int]:
     dims = [int(x.strip()) for x in text.split(",") if x.strip()]
     if not dims:
-        raise ValueError("hidden_dims cannot be empty")
+        raise ValueError('hidden_dims must be a comma-separated list of integers, e.g., "64,64"')
     return dims
 
 
