@@ -122,7 +122,7 @@ class MLP(nn.Module):
         if activation not in act_map:
             raise ValueError(f"Unsupported activation: {activation}")
         if not (0.0 <= dropout_prob < 1.0):
-            raise ValueError("dropout must be in [0, 1)")
+            raise ValueError("dropout_prob must be in [0, 1)")
         layers: List[nn.Module] = []
         prev = 2
         for h in hidden_dims:
