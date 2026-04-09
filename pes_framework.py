@@ -21,6 +21,8 @@ SIGMA_Y = np.array([0.8, 0.4, 0.5], dtype=np.float32)
 CONTOUR_INFER_BATCH_SIZE = 4096
 COLORBAR_SHRINK = 0.85
 MIN_SAMPLING_BATCH_SIZE = 1024
+EXTRAPOLATION_OVERSAMPLE_FACTOR = 2
+CONTOUR_LEVELS = 30
 
 
 def set_seed(seed: int) -> None:
@@ -83,7 +85,7 @@ def sample_extrapolation_ring(
     collected_points: List[np.ndarray] = []
     collected = 0
     while collected < n:
-        batch = max((n - collected) * 2, MIN_SAMPLING_BATCH_SIZE)
+        batch = max((n - collected) * EXTRAPOLATION_OVERSAMPLE_FACTOR, MIN_SAMPLING_BATCH_SIZE)
         cand = rng.uniform(outer_low, outer_high, size=(batch, 2)).astype(np.float32)
         in_inner = (
             (cand[:, 0] >= inner_low)
@@ -122,7 +124,7 @@ class MLP(nn.Module):
         if activation not in act_map:
             raise ValueError(f"Unsupported activation: {activation}")
         if not (0.0 <= dropout_prob < 1.0):
-            raise ValueError("dropout_prob must be in [0.0, 1.0)")
+            raise ValueError("dropout_prob must be >= 0.0 and < 1.0")
         layers: List[nn.Module] = []
         prev = 2
         for h in hidden_dims:
@@ -223,7 +225,7 @@ def plot_contour_comparison(
     pred_map = pred_v.reshape(grid_size, grid_size)
     vmin = float(min(true_map.min(), pred_map.min()))
     vmax = float(max(true_map.max(), pred_map.max()))
-    levels = np.linspace(vmin, vmax, 30)
+    levels = np.linspace(vmin, vmax, CONTOUR_LEVELS)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     c0 = axes[0].contourf(xx, yy, true_map, levels=levels)
