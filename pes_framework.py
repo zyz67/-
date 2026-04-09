@@ -122,7 +122,7 @@ class MLP(nn.Module):
         if activation not in act_map:
             raise ValueError(f"Unsupported activation: {activation}")
         if not (0.0 <= dropout_prob < 1.0):
-            raise ValueError("dropout_prob must be in [0, 1)")
+            raise ValueError("dropout_prob must be in [0.0, 1.0)")
         layers: List[nn.Module] = []
         prev = 2
         for h in hidden_dims:
@@ -460,14 +460,14 @@ def main() -> None:
         )
 
         results[method] = {
-            "interp_energy_mae": run.test_energy_mae,
-            "interp_force_mae": run.test_force_mae,
+            "interpolation_energy_mae": run.test_energy_mae,
+            "interpolation_force_mae": run.test_force_mae,
             "epochs_ran": len(run.train_loss),
         }
         extrap_loader = DataLoader(extrap_dataset, batch_size=args.batch_size, shuffle=False)
         ext_e_mae, ext_f_mae = evaluate_mae(run.model, extrap_loader, args.force_mode, device)
-        results[method]["extrap_energy_mae"] = ext_e_mae
-        results[method]["extrap_force_mae"] = ext_f_mae
+        results[method]["extrapolation_energy_mae"] = ext_e_mae
+        results[method]["extrapolation_force_mae"] = ext_f_mae
         model_path = os.path.join(args.output_dir, f"model_{method}.pth")
         torch.save(run.model.state_dict(), model_path)
         plot_loss(run.train_loss, run.val_loss, os.path.join(args.output_dir, f"loss_{method}.png"))
