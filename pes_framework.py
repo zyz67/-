@@ -69,6 +69,32 @@ def sample_gradient_importance(n: int, low: float, high: float, candidates: int,
     return pool[idx]
 
 
+def sample_extrapolation_ring(
+    n: int,
+    inner_low: float,
+    inner_high: float,
+    outer_low: float,
+    outer_high: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    points: List[np.ndarray] = []
+    collected = 0
+    while collected < n:
+        batch = max((n - collected) * 2, 1024)
+        cand = rng.uniform(outer_low, outer_high, size=(batch, 2)).astype(np.float32)
+        in_inner = (
+            (cand[:, 0] >= inner_low)
+            & (cand[:, 0] <= inner_high)
+            & (cand[:, 1] >= inner_low)
+            & (cand[:, 1] <= inner_high)
+        )
+        selected = cand[~in_inner]
+        if selected.shape[0] > 0:
+            points.append(selected)
+            collected += selected.shape[0]
+    return np.concatenate(points, axis=0)[:n]
+
+
 def sample_points(method: str, n: int, low: float, high: float, rng: np.random.Generator, candidates: int) -> np.ndarray:
     if method == "uniform":
         return sample_uniform(n, low, high, rng)
@@ -82,7 +108,7 @@ def sample_points(method: str, n: int, low: float, high: float, rng: np.random.G
 
 
 class MLP(nn.Module):
-    def __init__(self, hidden_dims: List[int], activation: str, output_dim: int):
+    def __init__(self, hidden_dims: List[int], activation: str, output_dim: int, dropout: float = 0.0):
         super().__init__()
         act_map = {
             "relu": nn.ReLU,
@@ -92,10 +118,14 @@ class MLP(nn.Module):
         }
         if activation not in act_map:
             raise ValueError(f"Unsupported activation: {activation}")
+        if not (0.0 <= dropout < 1.0):
+            raise ValueError("dropout must be in [0, 1)")
         layers: List[nn.Module] = []
         prev = 2
         for h in hidden_dims:
             layers.extend([nn.Linear(prev, h), act_map[activation]()])
+            if dropout > 0:
+                layers.append(nn.Dropout(p=dropout))
             prev = h
         layers.append(nn.Linear(prev, output_dim))
         self.net = nn.Sequential(*layers)
@@ -154,12 +184,66 @@ def evaluate_mae(model: nn.Module, loader: DataLoader, mode: str, device: torch.
     return e_abs / count, f_abs / (count * 2)
 
 
+def predict_energy_only(model: nn.Module, x: torch.Tensor, mode: str) -> torch.Tensor:
+    out = model(x)
+    if mode == "direct":
+        return out[:, 0]
+    if mode == "autograd":
+        return out.squeeze(-1)
+    raise ValueError(f"Unknown force mode: {mode}")
+
+
+def plot_contour_comparison(
+    model: nn.Module,
+    mode: str,
+    device: torch.device,
+    out_path: str,
+    low: float,
+    high: float,
+    grid_size: int = 161,
+) -> None:
+    coords = np.linspace(low, high, grid_size, dtype=np.float32)
+    xx, yy = np.meshgrid(coords, coords)
+    points = np.stack([xx.reshape(-1), yy.reshape(-1)], axis=1)
+    true_v, _ = potential_and_force_np(points)
+
+    model.eval()
+    pred_v_list: List[np.ndarray] = []
+    with torch.no_grad():
+        for i in range(0, points.shape[0], 4096):
+            x = torch.from_numpy(points[i:i + 4096]).to(device)
+            pred_v_list.append(predict_energy_only(model, x, mode).detach().cpu().numpy())
+    pred_v = np.concatenate(pred_v_list, axis=0)
+
+    true_map = true_v.reshape(grid_size, grid_size)
+    pred_map = pred_v.reshape(grid_size, grid_size)
+    vmin = float(min(true_map.min(), pred_map.min()))
+    vmax = float(max(true_map.max(), pred_map.max()))
+    levels = np.linspace(vmin, vmax, 30)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    c0 = axes[0].contourf(xx, yy, true_map, levels=levels)
+    axes[0].set_title("True PES")
+    axes[0].set_xlim(low, high)
+    axes[0].set_ylim(low, high)
+    c1 = axes[1].contourf(xx, yy, pred_map, levels=levels)
+    axes[1].set_title("Predicted PES")
+    axes[1].set_xlim(low, high)
+    axes[1].set_ylim(low, high)
+    fig.colorbar(c0, ax=axes[0], shrink=0.85)
+    fig.colorbar(c1, ax=axes[1], shrink=0.85)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def train_once(
     train_dataset: TensorDataset,
     val_dataset: TensorDataset,
     test_dataset: TensorDataset,
     hidden_dims: List[int],
     activation: str,
+    dropout: float,
     force_mode: str,
     optimizer_name: str,
     lr: float,
@@ -171,7 +255,7 @@ def train_once(
     device: torch.device,
 ) -> TrainResult:
     output_dim = 3 if force_mode == "direct" else 1
-    model = MLP(hidden_dims=hidden_dims, activation=activation, output_dim=output_dim).to(device)
+    model = MLP(hidden_dims=hidden_dims, activation=activation, output_dim=output_dim, dropout=dropout).to(device)
     optimizer = make_optimizer(optimizer_name, model.parameters(), lr)
     mse = nn.MSELoss()
 
@@ -300,6 +384,7 @@ def main() -> None:
     parser.add_argument("--lambda_force", type=float, default=1.0)
     parser.add_argument("--hidden_dims", type=str, default="64,64")
     parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "gelu", "sigmoid"])
+    parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--optimizer", type=str, default="adam", choices=["sgd", "adam", "adamw", "rmsprop"])
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--epochs", type=int, default=300)
@@ -324,8 +409,17 @@ def main() -> None:
 
     val_points = sample_uniform(args.val_size, -3.0, 3.0, rng)
     test_points = sample_uniform(args.test_size, -3.0, 3.0, rng)
+    extrap_points = sample_extrapolation_ring(
+        n=args.test_size,
+        inner_low=-3.0,
+        inner_high=3.0,
+        outer_low=-4.0,
+        outer_high=4.0,
+        rng=rng,
+    )
     val_dataset = to_dataset(val_points)
     test_dataset = to_dataset(test_points)
+    extrap_dataset = to_dataset(extrap_points)
 
     methods = ["uniform", "grid", "lhs", "grad_importance"] if args.compare_sampling else [args.sampling_method]
     results = {}
@@ -349,6 +443,7 @@ def main() -> None:
             test_dataset=test_dataset,
             hidden_dims=hidden_dims,
             activation=args.activation,
+            dropout=args.dropout,
             force_mode=args.force_mode,
             optimizer_name=args.optimizer,
             lr=args.lr,
@@ -363,11 +458,33 @@ def main() -> None:
         results[method] = {
             "test_energy_mae": run.test_energy_mae,
             "test_force_mae": run.test_force_mae,
+            "interp_energy_mae": run.test_energy_mae,
+            "interp_force_mae": run.test_force_mae,
             "epochs_ran": len(run.train_loss),
         }
+        extrap_loader = DataLoader(extrap_dataset, batch_size=args.batch_size, shuffle=False)
+        ext_e_mae, ext_f_mae = evaluate_mae(run.model, extrap_loader, args.force_mode, device)
+        results[method]["extrap_energy_mae"] = ext_e_mae
+        results[method]["extrap_force_mae"] = ext_f_mae
         model_path = os.path.join(args.output_dir, f"model_{method}.pth")
         torch.save(run.model.state_dict(), model_path)
         plot_loss(run.train_loss, run.val_loss, os.path.join(args.output_dir, f"loss_{method}.png"))
+        plot_contour_comparison(
+            model=run.model,
+            mode=args.force_mode,
+            device=device,
+            out_path=os.path.join(args.output_dir, f"contour_interp_{method}.png"),
+            low=-3.0,
+            high=3.0,
+        )
+        plot_contour_comparison(
+            model=run.model,
+            mode=args.force_mode,
+            device=device,
+            out_path=os.path.join(args.output_dir, f"contour_extrap_{method}.png"),
+            low=-4.0,
+            high=4.0,
+        )
 
     plot_sampling(sampling_points, os.path.join(args.output_dir, "sampling_points.png"))
     with open(os.path.join(args.output_dir, "metrics.json"), "w", encoding="utf-8") as f:
