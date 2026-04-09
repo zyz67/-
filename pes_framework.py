@@ -18,6 +18,9 @@ YI = np.array([0.5, -0.8, 1.2], dtype=np.float32)
 AI = np.array([2.0, 1.5, 1.0], dtype=np.float32)
 SIGMA_X = np.array([0.5, 0.7, 1.0], dtype=np.float32)
 SIGMA_Y = np.array([0.8, 0.4, 0.5], dtype=np.float32)
+CONTOUR_INFER_BATCH_SIZE = 4096
+COLORBAR_SHRINK = 0.85
+MIN_SAMPLING_BATCH_SIZE = 1024
 
 
 def set_seed(seed: int) -> None:
@@ -77,10 +80,10 @@ def sample_extrapolation_ring(
     outer_high: float,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    points: List[np.ndarray] = []
+    collected_points: List[np.ndarray] = []
     collected = 0
     while collected < n:
-        batch = max((n - collected) * 2, 1024)
+        batch = max((n - collected) * 2, MIN_SAMPLING_BATCH_SIZE)
         cand = rng.uniform(outer_low, outer_high, size=(batch, 2)).astype(np.float32)
         in_inner = (
             (cand[:, 0] >= inner_low)
@@ -90,9 +93,9 @@ def sample_extrapolation_ring(
         )
         selected = cand[~in_inner]
         if selected.shape[0] > 0:
-            points.append(selected)
+            collected_points.append(selected)
             collected += selected.shape[0]
-    return np.concatenate(points, axis=0)[:n]
+    return np.concatenate(collected_points, axis=0)[:n]
 
 
 def sample_points(method: str, n: int, low: float, high: float, rng: np.random.Generator, candidates: int) -> np.ndarray:
@@ -108,7 +111,7 @@ def sample_points(method: str, n: int, low: float, high: float, rng: np.random.G
 
 
 class MLP(nn.Module):
-    def __init__(self, hidden_dims: List[int], activation: str, output_dim: int, dropout: float = 0.0):
+    def __init__(self, hidden_dims: List[int], activation: str, output_dim: int, dropout_prob: float = 0.0):
         super().__init__()
         act_map = {
             "relu": nn.ReLU,
@@ -118,14 +121,14 @@ class MLP(nn.Module):
         }
         if activation not in act_map:
             raise ValueError(f"Unsupported activation: {activation}")
-        if not (0.0 <= dropout < 1.0):
+        if not (0.0 <= dropout_prob < 1.0):
             raise ValueError("dropout must be in [0, 1)")
         layers: List[nn.Module] = []
         prev = 2
         for h in hidden_dims:
             layers.extend([nn.Linear(prev, h), act_map[activation]()])
-            if dropout > 0:
-                layers.append(nn.Dropout(p=dropout))
+            if dropout_prob > 0:
+                layers.append(nn.Dropout(p=dropout_prob))
             prev = h
         layers.append(nn.Linear(prev, output_dim))
         self.net = nn.Sequential(*layers)
@@ -210,8 +213,9 @@ def plot_contour_comparison(
     model.eval()
     pred_v_list: List[np.ndarray] = []
     with torch.no_grad():
-        for i in range(0, points.shape[0], 4096):
-            x = torch.from_numpy(points[i:i + 4096]).to(device)
+        for i in range(0, points.shape[0], CONTOUR_INFER_BATCH_SIZE):
+            end = min(i + CONTOUR_INFER_BATCH_SIZE, points.shape[0])
+            x = torch.from_numpy(points[i:end]).to(device)
             pred_v_list.append(predict_energy_only(model, x, mode).detach().cpu().numpy())
     pred_v = np.concatenate(pred_v_list, axis=0)
 
@@ -223,15 +227,15 @@ def plot_contour_comparison(
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     c0 = axes[0].contourf(xx, yy, true_map, levels=levels)
-    axes[0].set_title("True PES")
+    axes[0].set_title("True Potential Energy Surface (PES)")
     axes[0].set_xlim(low, high)
     axes[0].set_ylim(low, high)
     c1 = axes[1].contourf(xx, yy, pred_map, levels=levels)
-    axes[1].set_title("Predicted PES")
+    axes[1].set_title("Predicted Potential Energy Surface (PES)")
     axes[1].set_xlim(low, high)
     axes[1].set_ylim(low, high)
-    fig.colorbar(c0, ax=axes[0], shrink=0.85)
-    fig.colorbar(c1, ax=axes[1], shrink=0.85)
+    fig.colorbar(c0, ax=axes[0], shrink=COLORBAR_SHRINK)
+    fig.colorbar(c1, ax=axes[1], shrink=COLORBAR_SHRINK)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -255,7 +259,7 @@ def train_once(
     device: torch.device,
 ) -> TrainResult:
     output_dim = 3 if force_mode == "direct" else 1
-    model = MLP(hidden_dims=hidden_dims, activation=activation, output_dim=output_dim, dropout=dropout).to(device)
+    model = MLP(hidden_dims=hidden_dims, activation=activation, output_dim=output_dim, dropout_prob=dropout).to(device)
     optimizer = make_optimizer(optimizer_name, model.parameters(), lr)
     mse = nn.MSELoss()
 
@@ -456,8 +460,6 @@ def main() -> None:
         )
 
         results[method] = {
-            "test_energy_mae": run.test_energy_mae,
-            "test_force_mae": run.test_force_mae,
             "interp_energy_mae": run.test_energy_mae,
             "interp_force_mae": run.test_force_mae,
             "epochs_ran": len(run.train_loss),
