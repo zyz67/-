@@ -1,0 +1,22 @@
+{
+  "uniform": {
+    "test_energy_mae": 0.5437486469745636,
+    "test_force_mae": 0.5067810118198395,
+    "epochs_ran": 60
+  },
+  "grid": {
+    "test_energy_mae": 0.5682836472988129,
+    "test_force_mae": 0.5311724543571472,
+    "epochs_ran": 60
+  },
+  "lhs": {
+    "test_energy_mae": 0.533057689666748,
+    "test_force_mae": 0.4905066192150116,
+    "epochs_ran": 60
+  },
+  "grad_importance": {
+    "test_energy_mae": 0.8613598346710205,
+    "test_force_mae": 0.4866269528865814,
+    "epochs_ran": 60
+  }
+}
