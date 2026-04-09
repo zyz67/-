@@ -3,7 +3,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -111,7 +111,7 @@ class TrainResult:
     test_force_mae: float
 
 
-def make_optimizer(name: str, params, lr: float):
+def make_optimizer(name: str, params: Iterable[torch.nn.Parameter], lr: float):
     if name == "sgd":
         return torch.optim.SGD(params, lr=lr, momentum=0.9)
     if name == "adam":

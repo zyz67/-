@@ -21,7 +21,7 @@ pip install torch numpy matplotlib
 在仓库根目录执行：
 
 ```bash
-python /home/runner/work/-/-/pes_framework.py --quick --compare_sampling --output_dir /home/runner/work/-/-/outputs
+python pes_framework.py --quick --compare_sampling --output_dir outputs
 ```
 
 运行后会在 `outputs/` 生成：
