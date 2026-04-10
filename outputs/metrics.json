@@ -1,22 +1,30 @@
 {
   "uniform": {
-    "test_energy_mae": 0.5437486469745636,
-    "test_force_mae": 0.5067810118198395,
-    "epochs_ran": 60
+    "interpolation_energy_mae": 0.5438264310359955,
+    "interpolation_force_mae": 0.4993434548377991,
+    "epochs_ran": 60,
+    "extrapolation_energy_mae": 0.9124972820281982,
+    "extrapolation_force_mae": 0.17852865159511566
   },
   "grid": {
-    "test_energy_mae": 0.5682836472988129,
-    "test_force_mae": 0.5311724543571472,
-    "epochs_ran": 60
+    "interpolation_energy_mae": 0.5572501420974731,
+    "interpolation_force_mae": 0.5238296091556549,
+    "epochs_ran": 60,
+    "extrapolation_energy_mae": 0.9153834581375122,
+    "extrapolation_force_mae": 0.20316724479198456
   },
   "lhs": {
-    "test_energy_mae": 0.533057689666748,
-    "test_force_mae": 0.4905066192150116,
-    "epochs_ran": 60
+    "interpolation_energy_mae": 0.5397083461284637,
+    "interpolation_force_mae": 0.4907133877277374,
+    "epochs_ran": 60,
+    "extrapolation_energy_mae": 0.8654900789260864,
+    "extrapolation_force_mae": 0.1595563367009163
   },
   "grad_importance": {
-    "test_energy_mae": 0.8613598346710205,
-    "test_force_mae": 0.4866269528865814,
-    "epochs_ran": 60
+    "interpolation_energy_mae": 0.8890004754066467,
+    "interpolation_force_mae": 0.49915818870067596,
+    "epochs_ran": 60,
+    "extrapolation_energy_mae": 1.5454988479614258,
+    "extrapolation_force_mae": 0.1877259537577629
   }
 }
