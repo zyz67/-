@@ -26,9 +26,11 @@ python pes_framework.py --quick --compare_sampling --output_dir outputs
 
 运行后会在 `outputs/` 生成：
 
-- `metrics.json`：各采样方法测试集能量/力 MAE
+- `metrics.json`：各采样方法插值区/外推区能量与力 MAE
 - `sampling_points.png`：采样点分布图
 - `loss_*.png`：训练/验证 loss 曲线
+- `contour_interp_*.png`：`[-3,3]^2` 真实/预测势能面并排等高线图
+- `contour_extrap_*.png`：`[-4,4]^2` 真实/预测势能面并排等高线图
 - `model_*.pth`：模型参数
 
 ## 常用参数
@@ -39,4 +41,5 @@ python pes_framework.py --quick --compare_sampling --output_dir outputs
 - `--alpha` 与 `--lambda_force`：能量与力损失权重
 - `--hidden_dims`：如 `64,64,64`
 - `--activation {relu,tanh,gelu,sigmoid}`
+- `--dropout`：隐藏层 Dropout 概率（如 `0.1`, `0.3`, `0.5`）
 - `--optimizer {sgd,adam,adamw,rmsprop}`
