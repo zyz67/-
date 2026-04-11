@@ -3,7 +3,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -189,6 +189,30 @@ def evaluate_mae(model: nn.Module, loader: DataLoader, mode: str, device: torch.
     return e_abs / count, f_abs / (count * 2)
 
 
+def evaluate_weighted_loss(
+    model: nn.Module,
+    loader: DataLoader,
+    mode: str,
+    device: torch.device,
+    alpha: float,
+    lambda_force: float,
+) -> float:
+    model.eval()
+    mse = nn.MSELoss(reduction="sum")
+    total_loss = 0.0
+    total_count = 0
+    for x, y_e, y_f in loader:
+        x = x.to(device)
+        y_e = y_e.to(device)
+        y_f = y_f.to(device)
+        with torch.set_grad_enabled(mode == "autograd"):
+            p_e, p_f = predict(model, x, mode, create_graph=False)
+            b_loss = alpha * mse(p_e, y_e) + lambda_force * mse(p_f, y_f)
+        total_loss += b_loss.item()
+        total_count += x.size(0)
+    return total_loss / total_count
+
+
 def predict_energy_only(model: nn.Module, x: torch.Tensor, mode: str) -> torch.Tensor:
     out = model(x)
     if mode == "direct":
@@ -369,11 +393,417 @@ def plot_loss(train_loss: List[float], val_loss: List[float], out_path: str) -> 
     plt.close()
 
 
+def plot_hidden_depth_vs_test_loss(depths: List[int], losses: List[float], out_path: str) -> None:
+    plt.figure(figsize=(6, 4))
+    plt.plot(depths, losses, marker="o")
+    plt.xlabel("hidden layer count")
+    plt.ylabel("test loss")
+    plt.xticks(depths)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+
+
+def plot_optimizer_train_loss(curves: Dict[str, List[float]], out_path: str) -> None:
+    plt.figure(figsize=(7, 4))
+    for name, values in curves.items():
+        plt.plot(values, label=name)
+    plt.xlabel("epoch")
+    plt.ylabel("train loss")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+
+
+def plot_multi_strategy_loss_curves(
+    train_curves: Dict[str, List[float]],
+    val_curves: Dict[str, List[float]],
+    out_path: str,
+) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    for name, values in train_curves.items():
+        axes[0].plot(values, label=name)
+    axes[0].set_xlabel("epoch")
+    axes[0].set_ylabel("loss")
+    axes[0].set_title("train loss")
+    axes[0].legend()
+    for name, values in val_curves.items():
+        axes[1].plot(values, label=name)
+    axes[1].set_xlabel("epoch")
+    axes[1].set_ylabel("loss")
+    axes[1].set_title("val loss")
+    axes[1].legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def first_epoch_reaching_threshold(values: List[float], threshold: float) -> Optional[int]:
+    for i, v in enumerate(values):
+        if v <= threshold:
+            return i + 1
+    return None
+
+
 def parse_hidden_dims(text: str) -> List[int]:
     dims = [int(x.strip()) for x in text.split(",") if x.strip()]
     if not dims:
         raise ValueError('hidden_dims must be a comma-separated list of integers, e.g., "64,64"')
     return dims
+
+
+def run_assignment_tasks(
+    args: argparse.Namespace,
+    rng: np.random.Generator,
+    device: torch.device,
+    val_dataset: TensorDataset,
+    test_dataset: TensorDataset,
+    extrap_dataset: TensorDataset,
+) -> None:
+    os.makedirs(args.output_dir, exist_ok=True)
+    assignment_results: Dict[str, object] = {}
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    extrap_loader = DataLoader(extrap_dataset, batch_size=args.batch_size, shuffle=False)
+
+    # 统一采用 LHS 采样，便于实验可比
+    train_points_lhs = sample_points(
+        method="lhs",
+        n=args.train_size,
+        low=-3.0,
+        high=3.0,
+        rng=rng,
+        candidates=args.candidate_size,
+    )
+    train_dataset_lhs = to_dataset(train_points_lhs)
+
+    # Task 1: 隐藏层数量(1~5) vs 测试 loss
+    depth_test_losses: List[float] = []
+    depth_results: Dict[str, Dict[str, float]] = {}
+    for depth in [1, 2, 3, 4, 5]:
+        hidden_dims = [64] * depth
+        run = train_once(
+            train_dataset=train_dataset_lhs,
+            val_dataset=val_dataset,
+            test_dataset=test_dataset,
+            hidden_dims=hidden_dims,
+            activation=args.activation,
+            dropout=0.0,
+            force_mode="autograd",
+            optimizer_name="rmsprop",
+            lr=args.lr,
+            alpha=1.0,
+            lambda_force=5.0,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            patience=args.patience,
+            device=device,
+        )
+        test_loss = evaluate_weighted_loss(
+            model=run.model,
+            loader=test_loader,
+            mode="autograd",
+            device=device,
+            alpha=1.0,
+            lambda_force=5.0,
+        )
+        depth_test_losses.append(test_loss)
+        depth_results[str(depth)] = {
+            "test_loss": test_loss,
+            "test_energy_mae": run.test_energy_mae,
+            "test_force_mae": run.test_force_mae,
+            "epochs_ran": len(run.train_loss),
+        }
+    plot_hidden_depth_vs_test_loss(
+        depths=[1, 2, 3, 4, 5],
+        losses=depth_test_losses,
+        out_path=os.path.join(args.output_dir, "task1_hidden_depth_vs_test_loss.png"),
+    )
+    assignment_results["task1_hidden_depth"] = depth_results
+
+    # Task 2: 四种优化器训练 loss 曲线 + 同精度收敛 epoch
+    optimizer_runs: Dict[str, TrainResult] = {}
+    optimizer_train_curves: Dict[str, List[float]] = {}
+    for opt_name in ["sgd", "adam", "adamw", "rmsprop"]:
+        run = train_once(
+            train_dataset=train_dataset_lhs,
+            val_dataset=val_dataset,
+            test_dataset=test_dataset,
+            hidden_dims=parse_hidden_dims(args.hidden_dims),
+            activation=args.activation,
+            dropout=args.dropout,
+            force_mode=args.force_mode,
+            optimizer_name=opt_name,
+            lr=args.lr,
+            alpha=args.alpha,
+            lambda_force=args.lambda_force,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            patience=args.patience,
+            device=device,
+        )
+        optimizer_runs[opt_name] = run
+        optimizer_train_curves[opt_name] = run.train_loss
+    plot_optimizer_train_loss(
+        curves=optimizer_train_curves,
+        out_path=os.path.join(args.output_dir, "task2_optimizers_train_loss.png"),
+    )
+    common_target = min(run.val_loss[-1] for run in optimizer_runs.values())
+    optimizer_metrics: Dict[str, Dict[str, object]] = {}
+    for name, run in optimizer_runs.items():
+        optimizer_metrics[name] = {
+            "final_train_loss": run.train_loss[-1],
+            "final_val_loss": run.val_loss[-1],
+            "epochs_ran": len(run.train_loss),
+            "epoch_reach_common_precision": first_epoch_reaching_threshold(run.val_loss, common_target),
+            "test_energy_mae": run.test_energy_mae,
+            "test_force_mae": run.test_force_mae,
+        }
+    best_optimizer = min(optimizer_metrics.items(), key=lambda kv: kv[1]["final_val_loss"])[0]
+    assignment_results["task2_optimizer_compare"] = {
+        "common_precision_target_val_loss": common_target,
+        "metrics": optimizer_metrics,
+        "best_optimizer_by_final_val_loss": best_optimizer,
+        "discussion": {
+            "sgd": "适合对泛化稳定性要求高、可接受较慢收敛、并愿意精细调学习率与动量的场景。",
+            "adam": "适合多数默认场景，通常收敛较快，对学习率不敏感，调参成本较低。",
+            "adamw": "适合需要权重衰减正则化的场景，通常在泛化与收敛速度间折中较好。",
+            "rmsprop": "适合损失地形非平稳或梯度尺度变化较大的问题，常有较快前期下降。",
+            "best_optimizer_reason": f"本次实验中 {best_optimizer} 的最终验证 loss 最低，因此表现最好；其自适应学习率机制在当前任务上更有效。",
+        },
+    }
+
+    # Task 5: 固定参数下在 3~5 层中选最优，作为最终模型
+    final_candidates: Dict[str, Dict[str, float]] = {}
+    final_model: Optional[nn.Module] = None
+    final_depth: Optional[int] = None
+    best_val_for_final = float("inf")
+    final_run: Optional[TrainResult] = None
+    for depth in [3, 4, 5]:
+        hidden_dims = [64] * depth
+        run = train_once(
+            train_dataset=train_dataset_lhs,
+            val_dataset=val_dataset,
+            test_dataset=test_dataset,
+            hidden_dims=hidden_dims,
+            activation=args.activation,
+            dropout=0.0,
+            force_mode="autograd",
+            optimizer_name="rmsprop",
+            lr=args.lr,
+            alpha=1.0,
+            lambda_force=5.0,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            patience=args.patience,
+            device=device,
+        )
+        cur_val = run.val_loss[-1]
+        final_candidates[str(depth)] = {
+            "final_val_loss": cur_val,
+            "test_energy_mae": run.test_energy_mae,
+            "test_force_mae": run.test_force_mae,
+            "epochs_ran": len(run.train_loss),
+        }
+        if cur_val < best_val_for_final:
+            best_val_for_final = cur_val
+            final_depth = depth
+            final_model = run.model
+            final_run = run
+    if final_model is None or final_depth is None or final_run is None:
+        raise RuntimeError("Failed to train final model candidates")
+    torch.save(final_model.state_dict(), os.path.join(args.output_dir, "model_final_best.pth"))
+    plot_loss(
+        final_run.train_loss,
+        final_run.val_loss,
+        os.path.join(args.output_dir, "task5_final_train_val_loss.png"),
+    )
+    plot_contour_comparison(
+        model=final_model,
+        mode="autograd",
+        device=device,
+        out_path=os.path.join(args.output_dir, "task5_contour_interp_final.png"),
+        low=-3.0,
+        high=3.0,
+    )
+    plot_contour_comparison(
+        model=final_model,
+        mode="autograd",
+        device=device,
+        out_path=os.path.join(args.output_dir, "task5_contour_extrap_final.png"),
+        low=-4.0,
+        high=4.0,
+    )
+    final_interp_e_mae, final_interp_f_mae = evaluate_mae(final_model, test_loader, "autograd", device)
+    final_extrap_e_mae, final_extrap_f_mae = evaluate_mae(final_model, extrap_loader, "autograd", device)
+    assignment_results["task5_final_model"] = {
+        "fixed_config": {
+            "sampling_method": "lhs",
+            "alpha": 1.0,
+            "lambda_force": 5.0,
+            "force_mode": "autograd",
+            "optimizer": "rmsprop",
+            "searched_hidden_depth": [3, 4, 5],
+            "hidden_units_per_layer": 64,
+        },
+        "searched_depth_results": final_candidates,
+        "best_depth": final_depth,
+        "test_metrics": {
+            "interpolation_energy_mae": final_interp_e_mae,
+            "interpolation_force_mae": final_interp_f_mae,
+            "extrapolation_energy_mae": final_extrap_e_mae,
+            "extrapolation_force_mae": final_extrap_f_mae,
+        },
+    }
+
+    # Task 4: 插值/外推 MAE + 等高线图（沿用最终模型）
+    assignment_results["task4_interp_extrap_report"] = {
+        "interpolation_energy_mae": final_interp_e_mae,
+        "interpolation_force_mae": final_interp_f_mae,
+        "extrapolation_energy_mae": final_extrap_e_mae,
+        "extrapolation_force_mae": final_extrap_f_mae,
+        "figures": {
+            "interp_contour": "task5_contour_interp_final.png",
+            "extrap_contour": "task5_contour_extrap_final.png",
+        },
+    }
+
+    # Task 3 / q6: 训练-验证曲线 + 过拟合处理 (Dropout / Early Stopping)
+    overfit_train_points = sample_points(
+        method="lhs",
+        n=max(64, args.train_size // 4),
+        low=-3.0,
+        high=3.0,
+        rng=rng,
+        candidates=args.candidate_size,
+    )
+    overfit_train_dataset = to_dataset(overfit_train_points)
+    overfit_hidden = [128, 128, 128, 128]
+    baseline_run = train_once(
+        train_dataset=overfit_train_dataset,
+        val_dataset=val_dataset,
+        test_dataset=test_dataset,
+        hidden_dims=overfit_hidden,
+        activation=args.activation,
+        dropout=0.0,
+        force_mode=args.force_mode,
+        optimizer_name=args.optimizer,
+        lr=args.lr,
+        alpha=args.alpha,
+        lambda_force=args.lambda_force,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        patience=args.epochs + 1,
+        device=device,
+    )
+    dropout_run = train_once(
+        train_dataset=overfit_train_dataset,
+        val_dataset=val_dataset,
+        test_dataset=test_dataset,
+        hidden_dims=overfit_hidden,
+        activation=args.activation,
+        dropout=0.3,
+        force_mode=args.force_mode,
+        optimizer_name=args.optimizer,
+        lr=args.lr,
+        alpha=args.alpha,
+        lambda_force=args.lambda_force,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        patience=args.epochs + 1,
+        device=device,
+    )
+    early_stop_run = train_once(
+        train_dataset=overfit_train_dataset,
+        val_dataset=val_dataset,
+        test_dataset=test_dataset,
+        hidden_dims=overfit_hidden,
+        activation=args.activation,
+        dropout=0.0,
+        force_mode=args.force_mode,
+        optimizer_name=args.optimizer,
+        lr=args.lr,
+        alpha=args.alpha,
+        lambda_force=args.lambda_force,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        patience=max(8, args.patience // 2),
+        device=device,
+    )
+    plot_multi_strategy_loss_curves(
+        train_curves={
+            "baseline": baseline_run.train_loss,
+            "dropout": dropout_run.train_loss,
+            "early_stopping": early_stop_run.train_loss,
+        },
+        val_curves={
+            "baseline": baseline_run.val_loss,
+            "dropout": dropout_run.val_loss,
+            "early_stopping": early_stop_run.val_loss,
+        },
+        out_path=os.path.join(args.output_dir, "task3_q6_overfit_strategies_loss.png"),
+    )
+    assignment_results["task3_q6"] = {
+        "main_train_val_curve_file": "task5_final_train_val_loss.png",
+        "overfit_experiment_curve_file": "task3_q6_overfit_strategies_loss.png",
+        "overfit_setting": {
+            "train_size": max(64, args.train_size // 4),
+            "hidden_dims": overfit_hidden,
+        },
+        "strategy_metrics": {
+            "baseline": {
+                "test_energy_mae": baseline_run.test_energy_mae,
+                "test_force_mae": baseline_run.test_force_mae,
+                "epochs_ran": len(baseline_run.train_loss),
+            },
+            "dropout": {
+                "test_energy_mae": dropout_run.test_energy_mae,
+                "test_force_mae": dropout_run.test_force_mae,
+                "epochs_ran": len(dropout_run.train_loss),
+            },
+            "early_stopping": {
+                "test_energy_mae": early_stop_run.test_energy_mae,
+                "test_force_mae": early_stop_run.test_force_mae,
+                "epochs_ran": len(early_stop_run.train_loss),
+            },
+        },
+        "qa": {
+            "q1_validation_set_role": "除早停外，验证集还用于模型选择、超参数选择、学习率/正则强度对比、监控训练稳定性以及发现数据分布漂移。",
+            "q2_training_state_diagnosis": "训练与验证 loss 都高且下降慢通常是欠拟合；两者都低且接近通常是适当拟合；训练 loss 持续下降但验证 loss 回升通常是过拟合。本实验可结合 `task3_q6_overfit_strategies_loss.png` 观察。",
+            "q3_overfit_mitigation": "Dropout 通过抑制共适应降低过拟合；早停通过在验证集不再改进时停止训练减少过拟合累积。请结合 strategy_metrics 比较其对测试误差的影响。",
+        },
+    }
+
+    # 生成汇总文件
+    result_json_path = os.path.join(args.output_dir, "assignment_results.json")
+    with open(result_json_path, "w", encoding="utf-8") as f:
+        json.dump(assignment_results, f, ensure_ascii=False, indent=2)
+    report_lines = [
+        "# Assignment Auto Report",
+        "",
+        "## 1) Hidden depth vs test loss",
+        f"- Figure: `task1_hidden_depth_vs_test_loss.png`",
+        "",
+        "## 2) Optimizer comparison",
+        "- Figure: `task2_optimizers_train_loss.png`",
+        f"- Common precision target (val loss): {assignment_results['task2_optimizer_compare']['common_precision_target_val_loss']}",
+        f"- Best optimizer: {assignment_results['task2_optimizer_compare']['best_optimizer_by_final_val_loss']}",
+        "",
+        "## 3) q6 train/val curves and overfitting handling",
+        "- Main curve: `task5_final_train_val_loss.png`",
+        "- Overfitting strategies curve: `task3_q6_overfit_strategies_loss.png`",
+        "",
+        "## 4) Interpolation/Extrapolation MAE + contour",
+        "- Figures: `task5_contour_interp_final.png`, `task5_contour_extrap_final.png`",
+        "",
+        "## 5) Final model",
+        f"- Best depth in [3,4,5]: {assignment_results['task5_final_model']['best_depth']}",
+        f"- Test metrics: {assignment_results['task5_final_model']['test_metrics']}",
+    ]
+    with open(os.path.join(args.output_dir, "assignment_report.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(report_lines) + "\n")
+    print(json.dumps(assignment_results, ensure_ascii=False, indent=2))
 
 
 def main() -> None:
@@ -398,6 +828,7 @@ def main() -> None:
     parser.add_argument("--patience", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--run_assignment", action="store_true")
     args = parser.parse_args()
 
     if args.quick:
@@ -426,6 +857,17 @@ def main() -> None:
     val_dataset = to_dataset(val_points)
     test_dataset = to_dataset(test_points)
     extrap_dataset = to_dataset(extrap_points)
+
+    if args.run_assignment:
+        run_assignment_tasks(
+            args=args,
+            rng=rng,
+            device=device,
+            val_dataset=val_dataset,
+            test_dataset=test_dataset,
+            extrap_dataset=extrap_dataset,
+        )
+        return
 
     methods = ["uniform", "grid", "lhs", "grad_importance"] if args.compare_sampling else [args.sampling_method]
     results = {}
